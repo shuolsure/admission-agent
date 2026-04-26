@@ -44,6 +44,62 @@ evo = EvoMap(
 # repeatedly across heartbeats.
 _seen_tasks: set[str] = set()
 _service_published = False
+_memory_hints_used = 0  # /health visibility: how many chats actually got hint-augmented
+
+
+SIM_THRESHOLD = 0.4  # only matches with similarity >= this contribute to the hint
+
+
+async def get_memory_hint(user_msg: str) -> str | None:
+    """Recall similar past sessions and return a short hint string for system_extra,
+    or None if no useful prior experience exists."""
+    sigs = memory_signals_for(user_msg)
+    if len(sigs) < 2:
+        return None  # too generic to retrieve usefully
+    try:
+        r = await asyncio.to_thread(evo.memory_recall, signals=sigs, limit=20)
+    except Exception as e:
+        log.warning("memory_recall failed for hint: %s", e)
+        return None
+    matches = [
+        m for m in (r.get("matches") or [])
+        if (m.get("similarity") or 0) >= SIM_THRESHOLD
+    ]
+    if not matches:
+        return None
+    total = len(matches)
+    successes = [m for m in matches if m.get("outcome", {}).get("status") == "success"]
+    fails = [m for m in matches if m.get("outcome", {}).get("status") == "failed"]
+    succ_n, fail_n = len(successes), len(fails)
+    rate = succ_n / total
+    score_vals = [m.get("outcome", {}).get("score") or 0 for m in matches]
+    avg_score = sum(score_vals) / total if score_vals else 0.0
+    high_sim = sorted(matches, key=lambda m: -(m.get("similarity") or 0))[:3]
+
+    if rate >= 0.75:
+        guidance = (
+            "你过去在这类咨询里多次成功，**保持当前的处理思路**："
+            "省份适配 + T1/T2 双源校验 + 冲稳保三档 + 金句收尾。"
+        )
+    elif rate <= 0.4:
+        guidance = (
+            "⚠️ 你过去对**相似 signal 组合**多次失败。本次特别注意：(1) **必须先 confirm 省份+分数+科类**三要素再给具体方案；"
+            "(2) 任何分数线/位次必须 ≥2 个 T1/T2 来源，单源必须 ⚠️ 标注；"
+            "(3) 数据缺位宁可标 「数据待补充」也不编造；(4) 检测心理危机信号立即切🟢档 + 给热线。"
+        )
+    else:
+        guidance = (
+            "你过去这类咨询结果不稳定，本次注意：把数据来源链路标清楚，"
+            "三要素未齐先追问而不是猜，方案给出后留 ⚠️ 风险评估段。"
+        )
+
+    sigs_view = ", ".join(sigs[:5])
+    sims_view = ", ".join(f"{m.get('similarity'):.2f}" for m in high_sim)
+    return (
+        f"signals={sigs_view}\n"
+        f"过去 {total} 次相似处理：{succ_n} 成 / {fail_n} 败，平均评分 {avg_score:.2f}，"
+        f"top-3 相似度 [{sims_view}]。\n\n{guidance}"
+    )
 
 
 async def publish_bundle_async(user_msg: str, reply: str, label: str = "chat") -> None:
@@ -310,7 +366,7 @@ async def lifespan(_app: FastAPI):
         hb_task.cancel()
 
 
-app = FastAPI(title="Admission Agent", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Admission Agent", version="0.5.0", lifespan=lifespan)
 
 
 class ChatMessage(BaseModel):
@@ -357,6 +413,7 @@ def health() -> dict:
         "node_registered": bool(evo.node_id and evo.node_secret),
         "service_published": _service_published,
         "tasks_seen": len(_seen_tasks),
+        "memory_hints_used": _memory_hints_used,
         "system_prompt_chars": len(system_prompt()),
         "worker_max_load": 1,
     }
@@ -364,9 +421,14 @@ def health() -> dict:
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(req: ChatRequest) -> ChatResponse:
+    global _memory_hints_used
     msgs = [{"role": m.role, "content": m.content} for m in req.messages]
-    reply = await asyncio.to_thread(chat, msgs, req.max_tokens or 2048)
     last_user = next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
+    hint = await get_memory_hint(last_user) if last_user else None
+    if hint:
+        _memory_hints_used += 1
+        log.info("memory hint applied: %s", hint[:120].replace("\n", " | "))
+    reply = await asyncio.to_thread(chat, msgs, req.max_tokens or 2048, hint)
     asyncio.create_task(publish_bundle_async(last_user, reply, label="chat"))
     asyncio.create_task(record_memory_async(last_user, reply, label="chat"))
     return ChatResponse(reply=reply)
@@ -374,12 +436,17 @@ async def chat_endpoint(req: ChatRequest) -> ChatResponse:
 
 @app.post("/a2a/dm")
 async def dm_inbound(payload: dict[str, Any]) -> JSONResponse:
+    global _memory_hints_used
     sender = payload.get("from") or payload.get("sender_id")
     content = payload.get("content") or payload.get("text") or ""
     log.info("DM from %s: %s", sender, content[:200])
     if not content:
         return JSONResponse({"status": "ignored", "reason": "empty"})
-    reply = await asyncio.to_thread(chat, [{"role": "user", "content": content}], 1500)
+    hint = await get_memory_hint(content)
+    if hint:
+        _memory_hints_used += 1
+        log.info("memory hint applied (dm): %s", hint[:120].replace("\n", " | "))
+    reply = await asyncio.to_thread(chat, [{"role": "user", "content": content}], 1500, hint)
     if sender:
         try:
             await asyncio.to_thread(evo.dm_send, sender, reply)
@@ -387,7 +454,7 @@ async def dm_inbound(payload: dict[str, Any]) -> JSONResponse:
             log.exception("dm reply failed: %s", e)
     asyncio.create_task(publish_bundle_async(content, reply, label="dm"))
     asyncio.create_task(record_memory_async(content, reply, label="dm"))
-    return JSONResponse({"status": "ok", "reply_chars": len(reply)})
+    return JSONResponse({"status": "ok", "reply_chars": len(reply), "memory_hint": bool(hint)})
 
 
 @app.get("/memory/status")

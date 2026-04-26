@@ -44,13 +44,24 @@ def get_client() -> Anthropic:
     )
 
 
-def chat(messages: list[dict], max_tokens: int = 2048) -> str:
-    """messages: [{role: 'user'|'assistant', content: str}, ...]"""
+def chat(
+    messages: list[dict],
+    max_tokens: int = 2048,
+    system_extra: str | None = None,
+) -> str:
+    """messages: [{role: 'user'|'assistant', content: str}, ...]
+
+    system_extra: optional string appended to the persistent system prompt
+    for THIS call only (e.g. memory recall hints, per-session priming).
+    """
     client = get_client()
+    sp = system_prompt()
+    if system_extra:
+        sp = f"{sp}\n\n---\n\n## 本次对话的额外上下文（来自 EvoMap 进化记忆）\n\n{system_extra}"
     resp = client.messages.create(
         model=LONGCAT_MODEL,
         max_tokens=max_tokens,
-        system=system_prompt(),
+        system=sp,
         messages=messages,
     )
     blocks = getattr(resp, "content", []) or []
@@ -62,5 +73,9 @@ def chat(messages: list[dict], max_tokens: int = 2048) -> str:
     return "\n".join(out).strip()
 
 
-def one_shot(user_message: str, max_tokens: int = 2048) -> str:
-    return chat([{"role": "user", "content": user_message}], max_tokens=max_tokens)
+def one_shot(user_message: str, max_tokens: int = 2048, system_extra: str | None = None) -> str:
+    return chat(
+        [{"role": "user", "content": user_message}],
+        max_tokens=max_tokens,
+        system_extra=system_extra,
+    )
