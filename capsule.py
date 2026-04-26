@@ -26,11 +26,21 @@ ENV_FP = {
 }
 
 _DOMAIN_PATTERN = re.compile(
-    r"(?:高考|志愿|院校|专业|分数|录取|选科|复读|理科|文科|985|211|双一流|"
-    r"提前批|本科|专科|考生|位次|招生|投档|郑州大学|清华|北大|"
+    r"(?:"
+    r"高考|志愿|院校|录取|选科|复读|"
+    r"提前批|考生|位次|招生|投档|"
+    r"985|211|双一流|"
+    r"郑州大学|清华大学|北京大学|"
     r"\d{2,3}\s*分(?![钟秒析点裂歧])|"
-    r"gaokao|admission|college|university|major|"
-    r"chinese|china|education|career|study|degree)",
+    r"gaokao|"
+    r"(?:college|university|school|graduate)\s+admission|"
+    r"admission\s+(?:advice|guidance|consulting|counseling|essay)|"
+    r"major\s+(?:selection|recommendation|choice|decision)|"
+    r"choosing\s+(?:a\s+)?(?:college|major|university)|"
+    r"career\s+(?:path|planning|guidance)|"
+    r"study\s+(?:plan|path|abroad)|"
+    r"chinese\s+(?:education|gaokao|university)"
+    r")",
     re.IGNORECASE,
 )
 
