@@ -133,6 +133,73 @@ def score_reply(user_msg: str, reply: str) -> float:
     return min(0.95, round(score, 3))
 
 
+_PROVINCES_PINYIN = {
+    "北京": "beijing", "上海": "shanghai", "天津": "tianjin", "重庆": "chongqing",
+    "河北": "hebei", "山西": "shanxi", "辽宁": "liaoning", "吉林": "jilin",
+    "黑龙江": "heilongjiang", "江苏": "jiangsu", "浙江": "zhejiang", "安徽": "anhui",
+    "福建": "fujian", "江西": "jiangxi", "山东": "shandong", "河南": "henan",
+    "湖北": "hubei", "湖南": "hunan", "广东": "guangdong", "广西": "guangxi",
+    "海南": "hainan", "四川": "sichuan", "贵州": "guizhou", "云南": "yunnan",
+    "西藏": "xizang", "陕西": "shaanxi", "甘肃": "gansu", "青海": "qinghai",
+    "宁夏": "ningxia", "新疆": "xinjiang", "内蒙古": "inner_mongolia",
+}
+
+
+def _score_bucket(score: int) -> str:
+    if score >= 680:
+        return "score_680plus"
+    if score >= 630:
+        return "score_630_680"
+    if score >= 580:
+        return "score_580_630"
+    if score >= 530:
+        return "score_530_580"
+    if score >= 480:
+        return "score_480_530"
+    return "score_below_480"
+
+
+def memory_signals_for(user_msg: str) -> list[str]:
+    """Stable, deterministic signals for memory.record/recall.
+
+    Each session produces a small set of canonical tokens so future recalls
+    on similar sessions hit the same keys (same province + score-bucket +
+    track => same signals).
+    """
+    sigs = ["gaokao_admission"]
+    for cn, pinyin in _PROVINCES_PINYIN.items():
+        if cn in user_msg:
+            sigs.append(f"province_{pinyin}")
+            break
+    score_match = re.search(r"(\d{2,3})\s*分(?![钟秒析点裂歧])", user_msg)
+    if score_match:
+        try:
+            sigs.append(_score_bucket(int(score_match.group(1))))
+        except ValueError:
+            pass
+    if "理科" in user_msg or "物理类" in user_msg:
+        sigs.append("track_science")
+    elif "文科" in user_msg or "历史类" in user_msg:
+        sigs.append("track_liberal_arts")
+    intent_rules = (
+        ("复读", "intent_repeat_year"),
+        ("选科", "intent_subject_selection"),
+        ("提前批", "intent_early_batch"),
+        ("专项计划", "intent_special_admission"),
+        ("中外合作", "intent_sino_foreign"),
+        ("艺术", "intent_arts"),
+        ("体育", "intent_sports"),
+        ("少数民族", "intent_minority"),
+        ("考砸", "intent_emotional_support"),
+        ("崩溃", "intent_emotional_support"),
+        ("不想活", "intent_crisis"),
+    )
+    for k, s in intent_rules:
+        if k in user_msg and s not in sigs:
+            sigs.append(s)
+    return sigs
+
+
 def extract_signals(text: str) -> list[str]:
     sig = ["gaokao_admission", "major_recommendation"]
     rules = (

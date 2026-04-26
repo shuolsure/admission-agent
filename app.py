@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from advisor import chat, system_prompt
-from capsule import build_bundle, is_in_domain
+from capsule import build_bundle, is_in_domain, memory_signals_for, score_reply
 from evomap import EvoMap
 
 load_dotenv()
@@ -63,6 +63,32 @@ async def publish_bundle_async(user_msg: str, reply: str, label: str = "chat") -
         )
     except Exception as e:
         log.exception("publish[%s] failed: %s", label, e)
+
+
+async def record_memory_async(user_msg: str, reply: str, label: str = "chat") -> None:
+    """Record this advisory session to EvoMap evolution memory.
+
+    Always recorded (success or failed) so we accumulate an experience log.
+    Status mapping: reply length < 100 chars => failed; otherwise score-gate
+    decides (score >= 0.7 => success).
+    """
+    try:
+        score = score_reply(user_msg, reply)
+        status = "success" if score >= 0.7 else "failed"
+        signals = memory_signals_for(user_msg)
+        ctx = f"[{label}] {user_msg[:120]} -> reply {len(reply)} chars, score {score:.2f}"
+        r = await asyncio.to_thread(
+            evo.memory_record, signals, status, score=score, context=ctx
+        )
+        log.info(
+            "memory[%s]: status=%s sigs=%s recorded=%s",
+            label,
+            status,
+            signals[:3],
+            r.get("recorded", "?"),
+        )
+    except Exception as e:
+        log.exception("memory record[%s] failed: %s", label, e)
 
 
 SERVICE_TITLE = "高考志愿咨询 · 张雪峰人格"
@@ -284,7 +310,7 @@ async def lifespan(_app: FastAPI):
         hb_task.cancel()
 
 
-app = FastAPI(title="Admission Agent", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Admission Agent", version="0.4.0", lifespan=lifespan)
 
 
 class ChatMessage(BaseModel):
@@ -342,6 +368,7 @@ async def chat_endpoint(req: ChatRequest) -> ChatResponse:
     reply = await asyncio.to_thread(chat, msgs, req.max_tokens or 2048)
     last_user = next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
     asyncio.create_task(publish_bundle_async(last_user, reply, label="chat"))
+    asyncio.create_task(record_memory_async(last_user, reply, label="chat"))
     return ChatResponse(reply=reply)
 
 
@@ -359,4 +386,30 @@ async def dm_inbound(payload: dict[str, Any]) -> JSONResponse:
         except Exception as e:
             log.exception("dm reply failed: %s", e)
     asyncio.create_task(publish_bundle_async(content, reply, label="dm"))
+    asyncio.create_task(record_memory_async(content, reply, label="dm"))
     return JSONResponse({"status": "ok", "reply_chars": len(reply)})
+
+
+@app.get("/memory/status")
+async def memory_status_endpoint() -> JSONResponse:
+    """Inspect our cumulative evolution memory: total entries, success rate, recent events."""
+    try:
+        data = await asyncio.to_thread(evo.memory_status)
+        return JSONResponse(data)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/memory/recall")
+async def memory_recall_endpoint(payload: dict[str, Any]) -> JSONResponse:
+    """Recall similar past sessions. body: {signals?: [...], query?: "...", limit?: 5}"""
+    try:
+        data = await asyncio.to_thread(
+            evo.memory_recall,
+            signals=payload.get("signals"),
+            query=payload.get("query"),
+            limit=int(payload.get("limit", 5)),
+        )
+        return JSONResponse(data)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)

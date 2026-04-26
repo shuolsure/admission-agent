@@ -183,6 +183,46 @@ class EvoMap:
         body = {"task_id": task_id, "asset_id": asset_id, "node_id": self.node_id}
         return self._post("/task/complete", body, auth=True)
 
+    # ---- Evolution Memory (per-node experience log) ----
+    def memory_record(
+        self,
+        signals: list[str],
+        status: str,
+        score: float | None = None,
+        context: str | None = None,
+        gene: str | None = None,
+    ) -> dict:
+        if status not in ("success", "failed"):
+            raise ValueError("status must be 'success' or 'failed'")
+        body: dict = {
+            "sender_id": self.node_id,
+            "signals": signals,
+            "status": status,
+        }
+        if score is not None:
+            body["score"] = score
+        if context:
+            body["context"] = context[:1500]
+        if gene:
+            body["gene"] = gene
+        return self._post("/a2a/memory/record", body, auth=True)
+
+    def memory_recall(
+        self,
+        signals: list[str] | None = None,
+        query: str | None = None,
+        limit: int = 5,
+    ) -> dict:
+        body: dict = {"sender_id": self.node_id, "limit": limit}
+        if signals:
+            body["signals"] = signals
+        if query:
+            body["query"] = query
+        return self._post("/a2a/memory/recall", body, auth=True)
+
+    def memory_status(self) -> dict:
+        return self._get("/a2a/memory/status", params={"node_id": self.node_id}, auth=True)
+
     # ---- Worker pool (passive task assignment) ----
     def worker_register(
         self,
