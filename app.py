@@ -129,36 +129,80 @@ def _task_relevant(task: dict) -> bool:
     return False
 
 
+async def _solve_and_publish(prompt: str) -> tuple[str, str | None]:
+    """Run the advisor and build a publishable bundle. Returns (reply, capsule_asset_id_or_None)."""
+    reply = await asyncio.to_thread(chat, [{"role": "user", "content": prompt}], 1500)
+    bundle = await asyncio.to_thread(build_bundle, prompt, reply)
+    if bundle is None:
+        return reply, None
+    pub = await asyncio.to_thread(evo.publish, bundle)
+    log.info("publish via task: %s", str(pub)[:200])
+    return reply, bundle[1]["asset_id"]
+
+
 async def handle_task(task: dict) -> None:
+    """Active selection (legacy /task/* endpoints)."""
     tid = task.get("task_id") or task.get("id")
     if not tid or tid in _seen_tasks:
         return
     _seen_tasks.add(tid)
     title = task.get("title", "")
     desc = task.get("description") or task.get("content") or ""
-    log.info("task: trying %s · %s", tid, title[:80])
+    log.info("task[active]: trying %s · %s", tid, title[:80])
     try:
         claim = await asyncio.to_thread(evo.task_claim, tid)
         cstatus = claim.get("status") or claim.get("payload", {}).get("status") or claim.get("_status")
         if cstatus and "error" in str(cstatus).lower():
-            log.info("task: claim refused for %s (%s)", tid, cstatus)
+            log.info("task[active]: claim refused %s (%s)", tid, cstatus)
             return
         prompt = (
-            f"以下是 EvoMap 平台上一个待处理的任务，请按你的志愿咨询专长给出方案。\n\n"
+            f"以下是 EvoMap 平台上一个待处理的志愿咨询任务，请按你的专长给出方案。\n\n"
             f"任务标题: {title}\n任务描述: {desc}\n\n请用张雪峰的语气回答。"
         )
-        reply = await asyncio.to_thread(chat, [{"role": "user", "content": prompt}], 1500)
-        bundle = await asyncio.to_thread(build_bundle, prompt, reply)
-        if bundle is None:
-            log.info("task: %s skipped (low quality reply)", tid)
+        _, cap_id = await _solve_and_publish(prompt)
+        if not cap_id:
+            log.info("task[active]: %s skipped (low quality)", tid)
             return
-        pub = await asyncio.to_thread(evo.publish, bundle)
-        cap_id = bundle[1]["asset_id"]
-        log.info("task: published capsule for %s -> %s", tid, str(pub)[:200])
         done = await asyncio.to_thread(evo.task_complete, tid, cap_id)
-        log.info("task: completed %s -> %s", tid, str(done)[:200])
+        log.info("task[active]: completed %s -> %s", tid, str(done)[:200])
     except Exception as e:
-        log.exception("task handle failed for %s: %s", tid, e)
+        log.exception("task[active] failed for %s: %s", tid, e)
+
+
+async def handle_work(item: dict) -> None:
+    """Worker pool flow: /a2a/work/claim -> accept -> complete."""
+    wid = item.get("id") or item.get("task_id")
+    if not wid or wid in _seen_tasks:
+        return
+    _seen_tasks.add(wid)
+    title = item.get("title", "")
+    signals = item.get("signals", "")
+    log.info("work[pool]: trying %s · %s", wid, title[:80])
+    try:
+        claim = await asyncio.to_thread(evo.work_claim, wid)
+        cstatus = claim.get("status") or claim.get("_status")
+        if cstatus and "error" in str(cstatus).lower():
+            log.info("work[pool]: claim refused %s (%s)", wid, cstatus)
+            return
+        assignment_id = (
+            claim.get("assignment_id")
+            or claim.get("assignment", {}).get("id")
+            or claim.get("id")
+        )
+        if assignment_id:
+            await asyncio.to_thread(evo.work_accept, assignment_id)
+        prompt = (
+            f"以下是 EvoMap worker 池派发的志愿咨询任务，请按你的专长给方案。\n\n"
+            f"任务标题: {title}\n相关信号: {signals}\n\n请用张雪峰的语气回答。"
+        )
+        _, cap_id = await _solve_and_publish(prompt)
+        if not cap_id or not assignment_id:
+            log.info("work[pool]: %s skipped (cap=%s assign=%s)", wid, bool(cap_id), bool(assignment_id))
+            return
+        done = await asyncio.to_thread(evo.work_complete, assignment_id, cap_id)
+        log.info("work[pool]: completed %s -> %s", wid, str(done)[:200])
+    except Exception as e:
+        log.exception("work[pool] failed for %s: %s", wid, e)
 
 
 async def heartbeat_loop(interval_ms_default: int = 300_000) -> None:
@@ -170,22 +214,48 @@ async def heartbeat_loop(interval_ms_default: int = 300_000) -> None:
                 await asyncio.sleep(60)
                 continue
             data = await asyncio.to_thread(evo.heartbeat)
+            avail_tasks = data.get("available_tasks") or []
+            avail_work = data.get("available_work") or []
+            pending = data.get("pending_events") or []
             log.info(
-                "heartbeat ok status=%s survival=%s claimed=%s tasks=%d",
-                data.get("status"),
+                "heartbeat ok survival=%s claimed=%s tasks=%d work=%d events=%d",
                 data.get("survival_status"),
                 data.get("claimed"),
-                len(data.get("available_tasks") or []),
+                len(avail_tasks),
+                len(avail_work),
+                len(pending),
             )
             next_ms = data.get("next_heartbeat_ms")
             if isinstance(next_ms, (int, float)) and next_ms > 0:
                 interval = next_ms / 1000
-            for t in (data.get("available_tasks") or []):
+            for t in avail_tasks:
                 if _task_relevant(t):
                     asyncio.create_task(handle_task(t))
+            for w in avail_work:
+                if _task_relevant(w):
+                    asyncio.create_task(handle_work(w))
         except Exception as e:
             log.exception("heartbeat error: %s", e)
         await asyncio.sleep(max(60, min(interval, 600)))
+
+
+async def maybe_register_worker() -> None:
+    """Idempotent worker registration. Sets enabled=true so Hub can match domain tasks."""
+    try:
+        r = await asyncio.to_thread(
+            evo.worker_register,
+            enabled=True,
+            domains=["education", "chinese_gaokao", "college_admission", "career_consulting"],
+            max_load=1,
+        )
+        log.info(
+            "worker register: status=%s enabled=%s load=%s",
+            r.get("status"),
+            r.get("worker_enabled"),
+            r.get("worker_max_load"),
+        )
+    except Exception as e:
+        log.exception("worker_register failed: %s", e)
 
 
 @asynccontextmanager
@@ -198,6 +268,14 @@ async def lifespan(_app: FastAPI):
             log.info("hello: node_id=%s claim_url=%s", p.get("your_node_id"), p.get("claim_url"))
         except Exception as e:
             log.exception("hello failed: %s", e)
+    else:
+        # Resume hello to refresh capabilities + url in directory.
+        try:
+            await asyncio.to_thread(evo.hello)
+            log.info("hello (resume): refreshed identity for %s", evo.node_id)
+        except Exception as e:
+            log.warning("resume hello failed: %s", e)
+    asyncio.create_task(maybe_register_worker())
     asyncio.create_task(maybe_publish_service())
     hb_task = asyncio.create_task(heartbeat_loop())
     try:
@@ -206,7 +284,7 @@ async def lifespan(_app: FastAPI):
         hb_task.cancel()
 
 
-app = FastAPI(title="Admission Agent", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Admission Agent", version="0.3.0", lifespan=lifespan)
 
 
 class ChatMessage(BaseModel):
@@ -254,6 +332,7 @@ def health() -> dict:
         "service_published": _service_published,
         "tasks_seen": len(_seen_tasks),
         "system_prompt_chars": len(system_prompt()),
+        "worker_max_load": 1,
     }
 
 

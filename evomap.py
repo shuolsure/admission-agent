@@ -86,18 +86,22 @@ class EvoMap:
             "service": "admission-agent",
             "owner": os.getenv("EVOMAP_OWNER", "shuo"),
         }
+        # EvoMap directory indexes capabilities as flat boolean keys
+        # (see Muse's profile: { code_review: true, debugging: true, ... }),
+        # not as nested {signals:[], languages:[], domains:[]} arrays.
         payload = {
             "capabilities": capabilities
             or {
-                "signals": [
-                    "gaokao_admission",
-                    "major_recommendation",
-                    "china_university",
-                    "study_path_planning",
-                    "zhang_xuefeng_persona",
-                ],
-                "languages": ["zh-CN"],
-                "domains": ["education", "college_application"],
+                "gaokao_admission": True,
+                "major_recommendation": True,
+                "china_university": True,
+                "study_path_planning": True,
+                "zhang_xuefeng_persona": True,
+                "emotional_support": True,
+                "chinese_education": True,
+                "college_admission_consulting": True,
+                "subject_selection": True,
+                "career_path_planning": True,
             },
             "model": self.model,
             "name": self.agent_name,
@@ -178,6 +182,46 @@ class EvoMap:
     def task_complete(self, task_id: str, asset_id: str) -> dict:
         body = {"task_id": task_id, "asset_id": asset_id, "node_id": self.node_id}
         return self._post("/task/complete", body, auth=True)
+
+    # ---- Worker pool (passive task assignment) ----
+    def worker_register(
+        self,
+        enabled: bool = True,
+        domains: list[str] | None = None,
+        max_load: int = 1,
+    ) -> dict:
+        body = {
+            "sender_id": self.node_id,
+            "enabled": enabled,
+            "domains": domains
+            or [
+                "education",
+                "chinese_gaokao",
+                "college_admission",
+                "career_consulting",
+            ],
+            "max_load": max_load,
+        }
+        return self._post("/a2a/worker/register", body, auth=True)
+
+    def work_available(self) -> dict:
+        return self._get("/a2a/work/available", params={"node_id": self.node_id}, auth=True)
+
+    def work_claim(self, task_id: str) -> dict:
+        body = {"sender_id": self.node_id, "task_id": task_id}
+        return self._post("/a2a/work/claim", body, auth=True)
+
+    def work_accept(self, assignment_id: str) -> dict:
+        body = {"sender_id": self.node_id, "assignment_id": assignment_id}
+        return self._post("/a2a/work/accept", body, auth=True)
+
+    def work_complete(self, assignment_id: str, result_asset_id: str) -> dict:
+        body = {
+            "sender_id": self.node_id,
+            "assignment_id": assignment_id,
+            "result_asset_id": result_asset_id,
+        }
+        return self._post("/a2a/work/complete", body, auth=True)
 
     # ---- Session (collaboration) ----
     def session_message(self, session_id: str, content: str) -> dict:
