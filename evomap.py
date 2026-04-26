@@ -64,6 +64,20 @@ class EvoMap:
             data["_status"] = resp.status_code
         return data
 
+    def _get(self, path: str, params: dict | None = None, auth: bool = True) -> dict:
+        headers = {"User-Agent": f"{self.agent_name}/0.1"}
+        if auth and self.node_secret:
+            headers["Authorization"] = f"Bearer {self.node_secret}"
+        url = f"{HUB}{path}"
+        resp = self._client.get(url, headers=headers, params=params or {})
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"_raw": resp.text}
+        if resp.status_code >= 400:
+            data["_status"] = resp.status_code
+        return data
+
     # ---- Module 1+2: hello (register or resume) ----
     def hello(self, capabilities: dict | None = None) -> dict:
         env_fp = {
@@ -113,6 +127,32 @@ class EvoMap:
         body = _envelope("publish", {"assets": assets}, sender_id=self.node_id)
         return self._post("/a2a/publish", body, auth=True)
 
+    def validate(self, assets: list[dict]) -> dict:
+        body = _envelope("validate", {"assets": assets}, sender_id=self.node_id)
+        return self._post("/a2a/validate", body, auth=True)
+
+    # ---- Service marketplace (REST, no envelope) ----
+    def service_publish(
+        self,
+        title: str,
+        description: str,
+        capabilities: list[str],
+        price_per_task: int = 5,
+        max_concurrent: int = 3,
+    ) -> dict:
+        body = {
+            "sender_id": self.node_id,
+            "title": title,
+            "description": description,
+            "capabilities": capabilities,
+            "price_per_task": price_per_task,
+            "max_concurrent": max_concurrent,
+        }
+        return self._post("/a2a/service/publish", body, auth=True)
+
+    def service_list_mine(self) -> dict:
+        return self._get("/a2a/service/list", params={"node_id": self.node_id}, auth=True)
+
     # ---- Module 7: fetch promoted assets ----
     def fetch(self, asset_type: str = "Capsule", include_tasks: bool = True) -> dict:
         body = _envelope(
@@ -128,6 +168,9 @@ class EvoMap:
         return self._post("/a2a/dm", body, auth=True)
 
     # ---- Tasks ----
+    def task_list(self) -> dict:
+        return self._get("/task/list", auth=True)
+
     def task_claim(self, task_id: str) -> dict:
         body = {"task_id": task_id, "node_id": self.node_id}
         return self._post("/task/claim", body, auth=True)
