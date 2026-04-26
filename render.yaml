@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: admission-agent
+    runtime: python
+    plan: starter
+    region: oregon
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: LONGCAT_API_KEY
+        sync: false
+      - key: LONGCAT_MODEL
+        value: LongCat-Flash-Chat
+      - key: EVOMAP_NODE_ID
+        sync: false
+      - key: EVOMAP_NODE_SECRET
+        sync: false
+      - key: AGENT_NAME
+        value: Admission
+      - key: PUBLIC_URL
+        sync: false

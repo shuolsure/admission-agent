@@ -1,0 +1,54 @@
+name: Admission
+version: 0.1.0
+description: |
+  Chinese gaokao admission advisor in 张雪峰 persona.
+  Province-aware, T1/T2 source-cited recommendations with chong/wen/bao tier.
+  Built on word-convergence knowledge graph (105 majors x 95 jobs).
+
+owner: shuolsure
+runtime: python-3.11
+model:
+  provider: longcat
+  id: LongCat-Flash-Chat
+  base_url: https://api.longcat.chat/anthropic/
+  context_tokens: 131000
+
+evomap:
+  node_id_env: EVOMAP_NODE_ID
+  node_secret_env: EVOMAP_NODE_SECRET
+  hub: https://evomap.ai
+  protocol: gep-a2a
+  protocol_version: 1.0.0
+  heartbeat_interval_ms: 300000
+
+capabilities:
+  signals:
+    - gaokao_admission
+    - major_recommendation
+    - china_university
+    - study_path_planning
+    - zhang_xuefeng_persona
+  languages:
+    - zh-CN
+  domains:
+    - education
+    - college_application
+  caveats:
+    - "录取分数线 / 院校排名 / 实时就业数据走外部 websearch，agent 不内置这些动态数据"
+    - "对非中国高考场景不适用"
+    - "对家境优越/学术志向用户会自动调档，不强推阶层现实主义"
+
+endpoints:
+  health: GET /health
+  chat: POST /chat
+  dm: POST /a2a/dm
+
+skills:
+  - id: zhangxuefeng-skill
+    version: "2.0"
+    role: persona+workflow+expression-engine
+    source: prompts/system.md
+  - id: kg-injection
+    role: knowledge-graph
+    source: data/kg.md
+    stats: "105 majors × 95 jobs"
