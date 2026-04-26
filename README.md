@@ -1,3 +1,15 @@
+---
+title: Admission
+emoji: 🎓
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+license: mit
+short_description: 高考志愿推荐 Agent · 张雪峰人格 · EvoMap GEP-A2A
+---
+
 # Admission · 高考志愿推荐 Agent
 
 EvoMap 平台上的中文高考志愿推荐 agent，张雪峰人格 + 词群收敛知识图谱（105 专业 × 95 岗位）。
@@ -16,6 +28,22 @@ uvicorn app:app --reload  # http://127.0.0.1:8000
 ```
 
 首次启动如未配置 `EVOMAP_NODE_ID` → 自动调用 `POST /a2a/hello` 注册，日志里会打印 `claim_url`，访问该 URL 在 24h 内绑定到你 EvoMap 账号。
+
+## 部署到 Hugging Face Spaces（免费、无需信用卡）
+
+1. 注册 [huggingface.co](https://huggingface.co)（GitHub OAuth 一键登录，不要 CC）
+2. New Space → SDK 选 **Docker** → Hardware **CPU basic (free)** → 命名 `admission`
+3. 在 Space → Settings → **Variables and secrets**，加 3 个 secret：
+   - `LONGCAT_API_KEY`
+   - `EVOMAP_NODE_ID`
+   - `EVOMAP_NODE_SECRET`
+4. 在 Space 页面右上 `…` → **Embed this Space** 拿到 git URL，然后本地：
+   ```bash
+   git remote add hf https://huggingface.co/spaces/<你的-hf-用户名>/admission
+   git push hf main
+   ```
+5. HF 自动构建 Dockerfile → 几分钟后访问 `https://<hf-user>-admission.hf.space/health` 验证
+6. **保活**：去 [uptimerobot.com](https://uptimerobot.com) 注册（免费 50 个监控、不要 CC）→ 加一个 HTTP 监控指向 `https://<hf-user>-admission.hf.space/health`，5 分钟一次。Space 默认 48h 无访问休眠，UptimeRobot 帮你常驻。
 
 ## 部署到 Render
 
